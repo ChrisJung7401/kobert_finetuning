@@ -10,8 +10,14 @@ INSPIRED BY HUGGING FACE transformers & FAST-BERT
 2. torch.distributed usable
 3. apex implemented
 
-v.0.0
+*****To-Do******
+1. extra optimizer & scheduler
+2. more options for model (google bert & etri bert ,...)
+3. prevent gradient overflow 
+4.
+****************
 
+v.0.0
 
 """
 
@@ -68,8 +74,8 @@ def parse():
     parser.add_argument("--seed", default=42,type=int,)
     parser.add_argument("--gradient_accumulation_steps", default=1,type=int,)
     parser.add_argument("--optimize_on_cpu", default=False,type=bool,)
-    parser.add_argument("--fp16", default=True,type=bool,)
-    parser.add_argument("--fp16_opt_level", default='O1',type=str,)
+    parser.add_argument("--fp16", default=False,type=bool,)
+    parser.add_argument("--fp16_opt_level", default='O2',type=str,)
     parser.add_argument("--loss_scale", default=0,type=int,)
     parser.add_argument("--logging_steps", default=100,type=int,)
     parser.add_argument("--max_grad_norm", default=1.0,type=float,)
@@ -80,12 +86,10 @@ def parse():
     
 def main():
     args = parse()
-    
-    current_env = os.environ.copy()
-    args.local_rank=int(current_env["LOCAL_RANK"])
-    
-    
-    
+    if args.local_rank!=-1:
+        current_env = os.environ.copy()
+        args.local_rank=int(current_env["LOCAL_RANK"])
+    print(args)
     ## setting seeds
     set_seeds(args.seed)
     ## set directories
@@ -99,7 +103,6 @@ def main():
     args.model_config = args.fund_dir /args.model_config 
     args.bert_model = args.fund_dir / args.bert_model
     args.data_path = args.fund_dir/args.data_dir
-    
     
     processors = {args.task_name: MultiClassTextProcessor}
     task_name = args.task_name.lower()
@@ -130,7 +133,6 @@ def main():
             with open(cached_train_features_file, 'rb') as reader:
                 train_features = pickle.load(reader)
         except:
-            
             train_features = convert_examples_to_features(
                 train_examples, label_list, args.max_seq_length, tokenizer, doc_stride=args.doc_stride)
             logger.info("  Saving train features into cached file %s", cached_train_features_file)
@@ -138,7 +140,6 @@ def main():
                 pickle.dump(train_features, writer)
         num_train_steps = int(
             len(train_features) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
-
     ##### Setup GPU parameters######
     if args.local_rank == -1 or args.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
@@ -168,7 +169,7 @@ def main():
     if args.fp16:
         try:
             import apex
-
+            ## apex example을 보면 이런식으로 해주는데.. 확인 필요
             apex.amp.register_half_function(torch, "einsum")
         except ImportError:
             raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
@@ -178,6 +179,7 @@ def main():
     # Prepare optimizer
     param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    ## 여기에 왜 weight_decay를 준것과 안준것 두가지를 넣을까???
     optimizer_grouped_parameters = [
         {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
         {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
@@ -202,7 +204,7 @@ def main():
                              lr=args.learning_rate,
                              warmup=args.warmup_proportion,
                              t_total=t_total)
-        logger.info("***Now, Model &optimizer setting is finished***")
+        logger.info("***Now, Model &optimizer setting is finished2***")
 
     scheduler = CyclicLR(optimizer, base_lr=2e-5, max_lr=5e-5, step_size=2500, last_batch_iteration=0)
 
@@ -233,8 +235,6 @@ def main():
     elif n_gpu > 1:
         model = torch.nn.DataParallel(model)
         logger.info("***Now, Model parallelized!!!***")
-    
-    
     
 
     if args.do_train:
@@ -288,11 +288,10 @@ def main():
                 else:
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), args.max_grad_norm
+                        model.parameters(), args.max_grad_norm
                     )
 
                 tr_loss += loss.item()
-#                 tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
                 nb_tr_examples += input_ids.size(0)
                 nb_tr_steps += 1
                 if (step + 1) % args.gradient_accumulation_steps == 0:
@@ -305,13 +304,12 @@ def main():
                     model.zero_grad()#optimizer.zero_grad()
                     global_step += 1
 
-                if args.logging_steps>0 and global_step % args.logging_steps==0 and args.local_rank in [-1, 0]:
+                if args.logging_steps>0 and global_step%args.logging_steps==0 and args.local_rank in [-1, 0]:
                     tb_writer.add_scalar("loss",(tr_loss - logging_loss) / args.logging_steps,global_step,)
                     tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
                 logging_loss = tr_loss
             logger.info('Loss after epoc {}'.format(tr_loss / nb_tr_steps))
             logger.info('Eval after epoc {}'.format(i_+1))
-        
         if args.local_rank in [-1, 0]:
             tb_writer.close()
     
@@ -336,9 +334,9 @@ def main():
         test_dataloader = DataLoader(test_data, sampler=test_sampler, 
                                      pin_memory=True, batch_size=args.eval_batch_size, shuffle = False, 
                                       num_workers = args.num_workers)
-        all_logits = None
-
+        
         model.eval()
+        all_logits = None
         eval_loss, eval_accuracy = 0, 0
         nb_eval_steps, nb_eval_examples = 0, 0
         for step, batch in enumerate(tqdm(test_dataloader, desc="Prediction Iteration")):
@@ -346,11 +344,10 @@ def main():
             input_ids = input_ids.to(device)
             input_mask = input_mask.to(device)
             segment_ids = segment_ids.to(device)
-
+            
             with torch.no_grad():
                 logits = model(input_ids, segment_ids, input_mask)
                 logits = logits.sigmoid()## softmax
-
             if all_logits is None:
                 all_logits = logits.detach().cpu().numpy()
             else:
@@ -360,8 +357,6 @@ def main():
             nb_eval_steps += 1
 
         result= pd.merge(pd.DataFrame(new_input_data), pd.DataFrame(all_logits, columns=label_list), left_index=True, right_index=True)
-    
-    
         result.loc[:, 'pred'] = result.iloc[:,2:].apply(lambda x: x.idxmax(), axis = 1)
     
         with open('/home/advice/notebook/jms/우리은행/data/news_te.txt', "r") as f:
@@ -376,7 +371,6 @@ def main():
                          pd.DataFrame(real_val), 
                          on = ['id'])
         acc = final[final.pred == final.real].shape[0]/final.shape[0]
-        
         logger.info('Accuracy of the model on test set: {}'.format(acc))
     
     

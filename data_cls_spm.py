@@ -103,91 +103,134 @@ class MultiClassTextProcessor(DataProcessor):
     
 def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer, doc_stride):
     """Loads a data file into a list of `InputBatch`s."""
-    label_map = {label : i for i, label in enumerate(label_list)}
-    features_all = []
-    for (ex_index, example) in enumerate(tqdm(examples)):
+    if doc_stride == 999:
+        return convert_examples_to_features_with_no_doc_stride(examples, label_list, max_seq_length, tokenizer)
+    else:
         
+        label_map = {label : i for i, label in enumerate(label_list)}
+        features_all = []
+        for (ex_index, example) in enumerate(tqdm(examples)):
+
+            tokens_a = tokenizer.tokenize(example.text_a)
+            tokens_b = None
+
+            max_tokens_for_doc = max_seq_length  - 2
+            _DocSpan = collections.namedtuple(  
+                "DocSpan", ["start", "length"])
+            doc_spans = []
+            start_offset = 0
+
+            while start_offset < len(tokens_a):
+                length = len(tokens_a) - start_offset
+                if length > max_tokens_for_doc:
+                    length = max_tokens_for_doc
+                doc_spans.append(_DocSpan(start=start_offset, length=length))
+                if start_offset + length == len(tokens_a):
+                    break
+                start_offset += min(length, doc_stride)
+
+            for (doc_span_index, doc_span) in enumerate(doc_spans):
+                features = []
+                tokens = []
+                segment_ids = [0]*max_seq_length
+                tokens.append("[CLS]")
+
+                for i in range(doc_span.length):
+                    split_token_index = doc_span.start + i
+                    tokens.append(tokens_a[split_token_index])
+
+                tokens.append("[SEP]")
+
+                input_ids = tokenizer.convert_tokens_to_ids(tokens)
+                input_mask = [1] * len(input_ids)
+
+                padding = [0] * (max_seq_length - len(input_ids))
+                input_ids += padding
+                input_mask += padding
+
+
+                assert len(input_ids) == max_seq_length
+                assert len(input_mask) == max_seq_length
+                assert len(segment_ids) == max_seq_length
+                labels_ids = []
+                for label in example.labels:
+                    labels_ids.append(float(label))
+
+
+                if ex_index < 10:
+                    logger.info("*** Example ***")
+                    logger.info("guid: %s" % (example.guid))
+                    logger.info("doc_span_index: %s" % (doc_span_index))
+                    logger.info("tokens: %s" % " ".join(
+                            [str(x) for x in tokens]))
+                    logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
+                    logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
+                    logger.info(
+                            "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
+                    logger.info("label: %s (id = %s)" % (example.labels, labels_ids))
+
+                features.append(
+                        InputFeatures(guid = example.guid,
+                                      input_ids=input_ids,
+                                      input_mask=input_mask,
+                                      segment_ids=segment_ids,
+                                      label_ids=labels_ids, 
+                                      doc_span_index = doc_span_index))
+                features_all.extend(features)## extend가 맞남... 모르겟다링~
+        return features_all
+
+def convert_examples_to_features_with_no_doc_stride(examples, 
+                                                    label_list, 
+                                                    max_seq_length, 
+                                                    tokenizer):
+
+    label_map = {label : i for i, label in enumerate(label_list)}
+    features = []
+    for (ex_index, example) in enumerate(examples):
         tokens_a = tokenizer.tokenize(example.text_a)
-        tokens_b = None
+        if len(tokens_a) > max_seq_length - 2:
+            tokens_a = tokens_a[:(max_seq_length - 2)]
 
-        max_tokens_for_doc = max_seq_length  - 2
-        _DocSpan = collections.namedtuple(  
-            "DocSpan", ["start", "length"])
-        doc_spans = []
-        start_offset = 0
+        tokens = ["[CLS]"] + tokens_a + ["[SEP]"]
+        segment_ids = [0] * len(tokens)
 
-        while start_offset < len(tokens_a):
-            length = len(tokens_a) - start_offset
-            if length > max_tokens_for_doc:
-                length = max_tokens_for_doc
-            doc_spans.append(_DocSpan(start=start_offset, length=length))
-            if start_offset + length == len(tokens_a):
-                break
-            start_offset += min(length, doc_stride)
+        input_ids = tokenizer.convert_tokens_to_ids(tokens)
 
-        for (doc_span_index, doc_span) in enumerate(doc_spans):
-            features = []
-            tokens = []
-            segment_ids = [0]*max_seq_length
-            tokens.append("[CLS]")
-            
-            for i in range(doc_span.length):
-                split_token_index = doc_span.start + i
-                tokens.append(tokens_a[split_token_index])
+        # The mask has 1 for real tokens and 0 for padding tokens. Only real
+        # tokens are attended to.
+        input_mask = [1] * len(input_ids)
 
-            tokens.append("[SEP]")
+        # Zero-pad up to the sequence length.
+        padding = [0] * (max_seq_length - len(input_ids))
+        input_ids += padding
+        input_mask += padding
+        segment_ids += padding
 
-            input_ids = tokenizer.convert_tokens_to_ids(tokens)
-            input_mask = [1] * len(input_ids)
-            
-            padding = [0] * (max_seq_length - len(input_ids))
-            input_ids += padding
-            input_mask += padding
+        assert len(input_ids) == max_seq_length
+        assert len(input_mask) == max_seq_length
+        assert len(segment_ids) == max_seq_length
+        
+        labels_ids = []
+        for label in example.labels:
+            labels_ids.append(float(label))
 
-            
-            assert len(input_ids) == max_seq_length
-            assert len(input_mask) == max_seq_length
-            assert len(segment_ids) == max_seq_length
-            labels_ids = []
-            for label in example.labels:
-                labels_ids.append(float(label))
+#         label_id = label_map[example.label]
+        if ex_index < 0:
+            logger.info("*** Example ***")
+            logger.info("guid: %s" % (example.guid))
+            logger.info("tokens: %s" % " ".join(
+                    [str(x) for x in tokens]))
+            logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
+            logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
+            logger.info(
+                    "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
+            logger.info("label: %s (id = %s)" % (example.labels, labels_ids))
 
-
-            if ex_index < 10:
-                logger.info("*** Example ***")
-                logger.info("guid: %s" % (example.guid))
-                logger.info("doc_span_index: %s" % (doc_span_index))
-                logger.info("tokens: %s" % " ".join(
-                        [str(x) for x in tokens]))
-                logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
-                logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
-                logger.info(
-                        "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-                logger.info("label: %s (id = %s)" % (example.labels, labels_ids))
-
-            features.append(
-                    InputFeatures(guid = example.guid,
-                                  input_ids=input_ids,
-                                  input_mask=input_mask,
-                                  segment_ids=segment_ids,
-                                  label_ids=labels_ids, 
-                                  doc_span_index = doc_span_index))
-            features_all.extend(features)## extend가 맞남... 모르겟다링~
-    return features_all
-
-
-def _truncate_seq_pair(tokens_a, tokens_b, max_length):
-    """Truncates a sequence pair in place to the maximum length."""
-
-    # This is a simple heuristic which will always truncate the longer sequence
-    # one token at a time. This makes more sense than truncating an equal percent
-    # of tokens from each, since if one sequence is very short then each token
-    # that's truncated likely contains more information than a longer sequence.
-    while True:
-        total_length = len(tokens_a) + len(tokens_b)
-        if total_length <= max_length:
-            break
-        if len(tokens_a) > len(tokens_b):
-            tokens_a.pop()
-        else:
-            tokens_b.pop()
+        features.append(
+                InputFeatures(guid = example.guid,
+                              input_ids=input_ids, 
+                              input_mask=input_mask,
+                              segment_ids=segment_ids,
+                              label_ids=labels_ids, 
+                              doc_span_index = 'No_doc_stride'))
+    return features
