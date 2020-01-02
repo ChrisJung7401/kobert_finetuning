@@ -4,9 +4,9 @@ fine-tuning pretrained BERT model with Kobert from SKT
 
 1. Multi-class Classification  
 
-  Datasets
-    - NSMC
-    - News data
+  Datasets  
+    - NSMC  
+    - News data  
 
 <br>
 
