@@ -12,7 +12,7 @@ fine-tuning pretrained BERT model with Kobert from SKT
     python -m torch.distributed.launch --nproc_per_node=4 run_classifier_spm.py \
       --train_file news_tr.txt \
       --eval_file news_te.txt \
-      --data_dir /home/advice/notebook/jms/우리은행/data/ \
+      --data_dir /home/advice/notebook/jms/haha/data/ \
       --task_name news \
       --bert_model extract_kobert/kobert_model.bin \
       --model_config extract_kobert/kobert_config.json \
