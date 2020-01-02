@@ -4,13 +4,13 @@ fine-tuning pretrained BERT model with Kobert from SKT
 
 1. Multi-class Classification  
 
-  *Datasets*    
+  **Datasets**    
     - NSMC  
     - News data  
 
 <br>
 
-  *How to use*  
+  **How to use**  
   
     python -m torch.distributed.launch --nproc_per_node=4 run_classifier_spm.py \
       --train_file news_tr.txt \
