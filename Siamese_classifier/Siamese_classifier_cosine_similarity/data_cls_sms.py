@@ -102,10 +102,7 @@ class MultiClassTextProcessor(DataProcessor):
         return examples
     
     
-def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer):
-    """Loads a data file into a list of `InputBatch`s."""
-
-    label_map = {label : i for i, label in enumerate(label_list)}
+def convert_examples_to_features(examples, max_seq_length, tokenizer):
 
     features = []
     for (ex_index, example) in enumerate(examples):
@@ -192,29 +189,28 @@ class SiameseFeatures(object):
         self.data_b_lab = data_b_lab
         self.label = label
 
-def convert_to_siamese_features(tf):
-    siamese_features = []
-    tf_len = len(tf)
-    for idx in range(tf_len):
-        data_a  = tf[idx].input_ids
-        data_a_mask = tf[idx].input_mask
-        data_a_lab = tf[idx].label_ids
-        for idx_2 in range(idx, tf_len):
-            data_b = tf[idx_2].input_ids
-            data_b_mask = tf[idx_2].input_mask
-            data_b_lab = tf[idx_2].label_ids
-            label = int(np.where(tf[idx].label_ids == tf[idx_2].label_ids, 
-                             1,0))
-            siamese_features.append(SiameseFeatures(feature_id = 'train_{}_{}'.format(int(idx), int(idx_2)), 
-                                                    data_a = data_a, 
-                                                    data_a_mask = data_a_mask, 
-                                                    data_a_lab = data_a_lab, 
-                                                    data_b = data_b, 
-                                                    data_b_mask = data_b_mask, 
-                                                    data_b_lab = data_b_lab, 
-                                                    label = label))
-    return siamese_features
+def split_list_into_half(mylist):
+    x = np.asarray(mylist)
+    mask = np.ones(len(mylist), dtype=bool)
+    ran_idx = np.random.choice(list(range(len(mylist))), size = len(mylist)//2, replace = False)
+    mask[ran_idx] = False
+    return list(x[mask]), list(x[~mask])
 
+def convert_to_siamese_features_v2(tf):
+    siamese_features = []
+    data_F, data_S = split_list_into_half(tf)
+    assert len(data_F) == len(data_S)
+
+    siamese_features =[SiameseFeatures(feature_id = 'train_{}'.format(int(idx)), 
+                                            data_a = data_F[idx].input_ids, 
+                                            data_a_mask = data_F[idx].input_mask, 
+                                            data_a_lab = data_F[idx].label_ids, 
+                                            data_b = data_S[idx].input_ids, 
+                                            data_b_mask = data_S[idx].input_mask, 
+                                            data_b_lab = data_S[idx].label_ids, 
+                                            label = int(np.where(data_F[idx].label_ids == data_S[idx].label_ids, 
+                     1,-1))) for idx in range(len(data_F)) ]##0 여기 cosinesimularityembedding loss 써보느라 바꿈
+    return siamese_features
 
 
 def convert_to_siamese_features_for_test(test, train):
@@ -230,7 +226,7 @@ def convert_to_siamese_features_for_test(test, train):
             data_b_mask = train[idx_2].input_mask
             data_b_lab = train[idx_2].label_ids
             label = int(np.where(test[idx].label_ids == train[idx_2].label_ids, 
-                             1,0))
+                             1,-1))##0 여기 cosinesimularityembedding loss 써보느라 바꿈
             siamese_features.append(SiameseFeatures(feature_id = 'test_{}'.format(int(idx)), 
                                                     data_a = data_a, 
                                                     data_a_mask = data_a_mask, 

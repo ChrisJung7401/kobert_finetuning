@@ -6,6 +6,9 @@ MADE BY MINSUNG JUNG
 
 INSPIRED BY HUGGING FACE transformers & FAST-BERT 
 
+need to implement
+1. multiprocessing on tokenizing with ray
+2. add nn.linear with vector average 
 
 v.0.0
 
@@ -21,6 +24,8 @@ from tqdm import tqdm, trange
 import numpy as np
 import pandas as pd
 from apex import amp
+import random
+
 
 import torch
 from datetime import date
@@ -28,7 +33,10 @@ from torch.utils.data import TensorDataset, DataLoader, RandomSampler, Sequentia
 from torch.utils.data.distributed import DistributedSampler
 from torch import Tensor
 from tensorboardX import SummaryWriter
+from torch.nn import CosineEmbeddingLoss
 
+
+from tqdm.notebook import tqdm as ntqdm
 from tokenization_spm import *
 from data_cls_sms import *
 from func_cls_sms import *
@@ -44,6 +52,7 @@ def parse():
     parser.add_argument("--fund_dir", default='/home/advice/notebook/jms/우리은행',type=Path)
     parser.add_argument("--train_file", default=None,type=Path,required=True,)
     parser.add_argument("--eval_file", default=None,type=Path,required=True,)
+    parser.add_argument("--dev_file", default=None,type=Path,required=True,)
     parser.add_argument("--data_dir", default=None,type=Path,required=True,)
     parser.add_argument("--task_name", default=None,type=str,required=True,)
     parser.add_argument("--no_cuda", default=False,type=bool,)
@@ -71,9 +80,53 @@ def parse():
     parser.add_argument("--logging_steps", default=100,type=int,)
     parser.add_argument("--max_grad_norm", default=1.0,type=float,)
     parser.add_argument("--num_workers", default=8,type=int,)
+    parser.add_argument("--train_set_size", default=10000,type=int,)
+    parser.add_argument("--valid_size", default=500,type=int,)
+    parser.add_argument("--save_steps", default=1000,type=int,)
+    
     args = parser.parse_args()
     return args
-    
+
+
+def evaluate_bert_tuning(model, eval_set,device, eval_batch_size = 32):
+    model.train(False)
+    eval_data = torch.tensor([f.data_a for f in eval_set],dtype=torch.long).to(device)
+    eval_data_mask = torch.tensor([f.data_a_mask for f in eval_set],dtype=torch.float).to(device)
+    eval_compare_data = torch.tensor([f.data_b for f in eval_set],dtype=torch.long).to(device)
+    eval_compare_data_mask = torch.tensor([f.data_b_mask for f in eval_set],dtype=torch.float).to(device)
+    eval_ans = [f.data_a_lab[0] for f in eval_set]
+    eval_id = [f.feature_id for f in eval_set]
+    eval_lab = [f.data_b_lab[0] for f in eval_set]
+
+    test_data = TensorDataset(eval_data, eval_data_mask, eval_compare_data, eval_compare_data_mask)
+    test_sampler = SequentialSampler(test_data)
+    test_dataloader = DataLoader(test_data, sampler=test_sampler, batch_size=eval_batch_size)
+    model.eval()
+    all_logits = None
+    for step, batch in enumerate(tqdm(test_dataloader, desc="Prediction Iteration")):
+        batch = tuple(t.to(device) for t in batch)
+        test_data, test_data_mask, compare_data, compare_data_mask = batch
+        with torch.no_grad():
+            a,b,logits = model(test_data, test_data_mask, compare_data, compare_data_mask)
+            if all_logits is None:
+                all_logits = logits.detach().cpu().numpy()
+            else:
+                all_logits = np.concatenate((all_logits, logits.detach().cpu().numpy()), axis=0)
+    result = pd.DataFrame({'test_id': eval_id, 'train_label':eval_lab, 'prob':all_logits,'real':eval_ans})      
+    result_pivot = pd.pivot_table(result, values='prob', 
+                                  index = ['test_id', 'real'], 
+                                  columns = ['train_label'], aggfunc = np.mean)
+    result_pivot.loc[:,'pred'] = result_pivot.idxmax(axis = 1)
+    result_pivot = result_pivot.reset_index()
+    tot_acc = result_pivot[result_pivot['real'] == result_pivot['pred']].shape[0]/result_pivot.shape[0]
+    cls_5_acc = result_pivot[(result_pivot['real']==5)&(result_pivot['real'] == result_pivot['pred'])].shape[0]/result_pivot[result_pivot['real']==5].shape[0]
+    rest_acc = result_pivot[(result_pivot['real']!=5)&(result_pivot['real'] == result_pivot['pred'])].shape[0]/result_pivot[result_pivot['real']!=5].shape[0]
+#     print(' tot_acc: {} \n cls_5_acc: {} \n rest_acc: {} \n'.format(100*tot_acc, 100*cls_5_acc,100*rest_acc))
+    return tot_acc, cls_5_acc, rest_acc
+
+
+
+
     
 def main():
     args = parse()
@@ -81,8 +134,7 @@ def main():
         current_env = os.environ.copy()
         args.local_rank=int(current_env["LOCAL_RANK"])
     
-    
-    print(args)
+
     ## setting seeds
     set_seeds(args.seed)
     ## set directories
@@ -96,6 +148,8 @@ def main():
     args.model_config = args.fund_dir /args.model_config 
     args.bert_model = args.fund_dir / args.bert_model
     args.data_path = args.fund_dir/args.data_dir
+    
+    print(args)
     
     processors = {args.task_name: MultiClassTextProcessor}
     task_name = args.task_name.lower()
@@ -111,9 +165,8 @@ def main():
                                       train_file = args.train_file, 
                                       test_file = args.eval_file, 
                                       labels = lab,
+                                      dev_file = args.dev_file
                                      )
-    label_list = processor.get_labels()
-    num_labels = len(label_list)
     ## get tokenizer
     tokenizer = BERTSPMTokenizer.from_pretrained(args.tokenizer)
     train_examples = None
@@ -128,12 +181,18 @@ def main():
         except:
             
             train_features = convert_examples_to_features(
-                train_examples, label_list, args.max_seq_length, tokenizer)
+                train_examples, args.max_seq_length, tokenizer)
             logger.info("  Saving train features into cached file %s", cached_train_features_file)
             with open(cached_train_features_file, "wb") as writer:
                 pickle.dump(train_features, writer)
+        train_features = random.sample(train_features, args.train_set_size*2)
         num_train_steps = int(
             len(train_features) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
+    
+    test_examples = processor.get_test_examples()
+    dev_examples = processor.get_dev_examples()
+    test_features = convert_examples_to_features(test_examples, args.max_seq_length, tokenizer)
+    dev_features = convert_examples_to_features(dev_examples, args.max_seq_length, tokenizer)
     ##### Setup GPU parameters######
     if args.local_rank == -1 or args.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
@@ -147,15 +206,12 @@ def main():
             device, n_gpu, bool(args.local_rank != -1), args.fp16))
     
     if args.local_rank not in [-1, 0]:
-        # 모델을 한gpu에 올리겟다... 인데 다올라감... 수정 및 확인 필요
         torch.distributed.barrier()
-        
-        
+
     bert_config = modeling.BertConfig.from_json_file(args.model_config)
-    model = BertForSiameseClassification(bert_config, num_labels = num_labels)
+    model = BertForSiameseClassification(bert_config)
     model.bert.load_state_dict(torch.load(args.bert_model))
     if args.local_rank == 0:
-        # 모델을 한gpu에 올리겟다... 인데 다올라감... 수정 및 확인 필요
         torch.distributed.barrier()
     model.to(device)
     
@@ -238,12 +294,15 @@ def main():
         logger.info("  Num features = %d", len(train_features))
         logger.info("  Batch size = %d", args.train_batch_size)
         logger.info("  Num steps = %d", num_train_steps)
-        siamese_features = convert_to_siamese_features(train_features)
+        siamese_features = convert_to_siamese_features_v2(train_features)
+        eval_features = convert_examples_to_features(
+    test_examples[-args.valid_size:], args.max_seq_length, tokenizer)
+        eval_set = convert_to_siamese_features_for_test(eval_features, dev_features)
         all_data_a = torch.tensor([f.data_a for f in siamese_features],dtype=torch.long)
         all_data_a_mask = torch.tensor([f.data_a_mask for f in siamese_features],dtype=torch.float)
         all_data_b = torch.tensor([f.data_b for f in siamese_features],dtype=torch.long)
         all_data_b_mask = torch.tensor([f.data_b_mask for f in siamese_features],dtype=torch.float)
-        all_label = torch.tensor([f.label for f in siamese_features])
+        all_label = torch.tensor([f.label for f in siamese_features],dtype=torch.float)
         train_data = TensorDataset(all_data_a, all_data_a_mask, all_data_b, all_data_b_mask, all_label)
         if args.local_rank == -1:
             train_sampler = RandomSampler(train_data)
@@ -257,27 +316,26 @@ def main():
         tensorboard_dir.mkdir(exist_ok=True)
         if args.local_rank in [-1, 0]:
             tb_writer = SummaryWriter(tensorboard_dir)
-
-        global_step = 0
-        tr_loss, logging_loss, epoch_loss = 0.0, 0.0, 0.0
+        model.module.unfreeze_bert_encoder()
         model.train()
-        for i_ in tqdm(range(int(args.num_train_epochs)), desc="Epoch"):
-
-            tr_loss = 0
-            nb_tr_examples, nb_tr_steps = 0, 0
-            for step, batch in enumerate(train_dataloader):
-
+        loss_total = 0.0
+        global_step = 0
+        
+        for epoch_idx in tqdm(range(int(args.num_train_epochs))) : 
+            for step, batch in tqdm(enumerate(train_dataloader)):
+                model.train(True)
                 batch = tuple(t.to(device) for t in batch)
                 dat_a, mask_a, dat_b, mask_b, lab= batch
-                logit, _ = model(dat_a, mask_a, dat_b, mask_b)
-                loss_func = torch.nn.CrossEntropyLoss() 
-                loss = loss_func(logit, lab)
+                a, b, _ = model(dat_a, mask_a, dat_b, mask_b)
+
+                loss_func = torch.nn.CosineEmbeddingLoss() 
+                loss = loss_func(a,b, lab)
+                optimizer.zero_grad()
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
                 if args.gradient_accumulation_steps > 1:
                     loss = loss / args.gradient_accumulation_steps
-                
-                
+
                 if args.fp16:
                     with amp.scale_loss(loss, optimizer) as scaled_loss:
                         scaled_loss.backward()
@@ -290,27 +348,37 @@ def main():
                         model.parameters(), args.max_grad_norm
                     )
 
-                tr_loss += loss.item()
-                nb_tr_steps += 1
+
                 if (step + 1) % args.gradient_accumulation_steps == 0:
-        #             scheduler.batch_step()
-                    # modify learning rate with special warm up BERT uses
+                    scheduler.batch_step()
                     lr_this_step = args.learning_rate * warmup_linear(global_step/t_total, args.warmup_proportion)
                     for param_group in optimizer.param_groups:
                         param_group['lr'] = lr_this_step
-                    optimizer.step()
-                    model.zero_grad()#optimizer.zero_grad()
-                    global_step += 1
-
-                if args.logging_steps>0 and global_step % args.logging_steps==0 and args.local_rank in [-1, 0]:
-                    tb_writer.add_scalar("loss",(tr_loss - logging_loss) / args.logging_steps,global_step,)
-#                     tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
-                logging_loss = tr_loss
-            logger.info('Loss after epoc {}'.format(tr_loss / nb_tr_steps))
-            logger.info('Eval after epoc {}'.format(i_+1))
-        
+                optimizer.step()
+                loss_total += loss.item()
+                if (args.logging_steps>0 and global_step%args.logging_steps==0 
+                    and global_step!=0 and args.local_rank in [-1, 0]):
+        #             tb_writer.add_scalar("loss",(tr_loss - logging_loss) / args['logging_steps'],global_step)
+                    tot_acc, cls_5_acc, rest_acc = evaluate_bert_tuning(model = model, 
+                                                                        eval_set = eval_set, 
+                                                                        device = device, 
+                                                                        eval_batch_size = args.eval_batch_size)
+                    tb_writer.add_scalar("loss",loss_total/global_step,global_step)
+                    tb_writer.add_scalar("lr", scheduler.get_lr()[0], global_step)
+                    tb_writer.add_scalar("val_tot_acc",tot_acc,global_step)
+                    tb_writer.add_scalar("val_cls_5_acc",cls_5_acc,global_step)
+                    tb_writer.add_scalar("val_cls_rest_acc",rest_acc,global_step)
+                if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
+                    # Save model checkpoint
+                    output_dir_1 = os.path.join(output_dir, 'checkpoint-{}'.format(global_step))
+                    if not os.path.exists(output_dir_1):
+                        os.makedirs(output_dir_1)
+                    model_to_save = model.module if hasattr(model, 'module') else model
+                    torch.save(model_to_save.state_dict(), os.path.join(output_dir_1, 'training_args.bin'))
+                global_step += 1
+            print("train_loss : ", loss_total/global_step)
         if args.local_rank in [-1, 0]:
-            tb_writer.close()
+            tb_writer.close()    
     
     
     # Save a trained model
@@ -321,51 +389,13 @@ def main():
     
     if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
         
-        
-        test_examples = processor.get_test_examples()
-        test_features = convert_examples_to_features(
-        test_examples[:1000], label_list, args.max_seq_length, tokenizer)
-#         train_features_picked = 
-        test_set = convert_to_siamese_features_for_test(test_features, train_features)
-        all_test_data = torch.tensor([f.data_a for f in test_set],dtype=torch.long)
-        all_test_data_mask = torch.tensor([f.data_a_mask for f in test_set],dtype=torch.float)
-        all_compare_data = torch.tensor([f.data_b for f in test_set],dtype=torch.long)
-        all_compare_data_mask = torch.tensor([f.data_b_mask for f in test_set],dtype=torch.float)
-        test_ans = [f.data_a_lab[0] for f in test_set]
-        test_id = [f.feature_id for f in test_set]
-        train_lab = [f.data_b_lab[0] for f in test_set]
-        test_data = TensorDataset(all_test_data, all_test_data_mask, all_compare_data, all_compare_data_mask)
-        test_sampler = SequentialSampler(test_data)
-        test_dataloader = DataLoader(test_data, sampler=test_sampler, 
-                                     pin_memory=True, batch_size=args.eval_batch_size, shuffle = False, 
-                                      num_workers = args.num_workers)
+
+
         model.eval()
-        all_logits = None
-        for step, batch in enumerate(tqdm(test_dataloader, desc="Prediction Iteration")):
-            batch = tuple(t.to(device) for t in batch)
-            test_data, test_data_mask, compare_data, compare_data_mask = batch
-            with torch.no_grad():
-                _,logits = model(test_data, test_data_mask, compare_data, compare_data_mask)
-                if all_logits is None:
-                    all_logits = logits.detach().cpu().numpy()
-                else:
-                    all_logits = np.concatenate((all_logits, logits.detach().cpu().numpy()), axis=0)
-
-
-        result = pd.DataFrame({'test_id': test_id, 'train_label':train_lab, 'prob':all_logits[:,1],'real':test_ans})
         
-        
-        result_pivot = pd.pivot_table(result, values='prob', 
-                              index = ['test_id', 'real'], 
-                              columns = ['train_label'], aggfunc = np.mean)
-    
-        result_pivot.loc[:,'pred'] = result_pivot.apply(lambda row: np.argmax(row), axis = 1)
-        result_pivot = result_pivot.reset_index()
-        result_pivot[result_pivot['real'] == result_pivot['pred']].shape[0]/result_pivot.shape[0]
-        result_pivot = result_pivot.reset_index()
-        acc = result_pivot[result_pivot['real'] == result_pivot['pred']].shape[0]/result_pivot.shape[0]
-        
-        logger.info('Accuracy of the model on test set: {}'.format(acc))
+        test_set = convert_to_siamese_features_for_test(test_features[:-args.valid_size], dev_features)
+        tot_acc, cls_5_acc, rest_acc = evaluate_bert_tuning(model = model,eval_set =  test_set,device = device, eval_batch_size = args.eval_batch_size)
+        logger.info(' \n TOTAL_ACC: {} \n NEW_CLS_ACC: {} \n REST_CLS_ACC: {}'.format(tot_acc, cls_5_acc, rest_acc))
     
     
 if __name__ == "__main__":

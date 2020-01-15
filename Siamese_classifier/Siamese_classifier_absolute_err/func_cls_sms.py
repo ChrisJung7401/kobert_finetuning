@@ -30,19 +30,7 @@ def set_seeds(seed):
 class AvgVec(nn.Module):
     def __init__(self):
         super(AvgVec, self).__init__()
-
-    def forward(self, hidden_states, mask):
-        last_layer = hidden_states[-1]
-        input_vecs = last_layer
-
-        sum_vecs = (input_vecs * mask.unsqueeze(-1)).sum(1)
-        avg_vecs = sum_vecs / mask.sum(1, keepdim=True)
-        return avg_vecs
-
-
-class AvgVec(nn.Module):
-    def __init__(self):
-        super(AvgVec, self).__init__()
+    
 
     def forward(self, hidden_states, mask):
         last_layer = hidden_states[-1]
@@ -54,27 +42,34 @@ class AvgVec(nn.Module):
 
 
 class BertForSiameseClassification(BertPreTrainedModel):
-    def __init__(self, config, num_labels=2):
+    def __init__(self, config):
         super(BertForSiameseClassification, self).__init__(config)
-        self.num_labels = num_labels
         self.bert = BertModel(config)
         self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
         self.classifier = torch.nn.Linear(config.hidden_size, 2)
         self.apply(self.init_bert_weights)
         self.avg_vec = AvgVec()
 
+
     def forward(self, input_ids_1, input_mask_1, input_ids_2, input_mask_2):
         self.bert.eval()
-        encoder_layer_1, pooled_output_1 = self.bert(input_ids_1, token_type_ids=None, 
-                                                     attention_mask=input_mask_1)
-        encoder_layer_2, pooled_output_2 = self.bert(input_ids_2, token_type_ids=None, 
-                                                     attention_mask=input_mask_2)
+        encoder_layer_1, pooled_output_1 = self.bert(input_ids_1, token_type_ids=None, attention_mask=input_mask_1)
+        encoder_layer_2, pooled_output_2 = self.bert(input_ids_2, token_type_ids=None, attention_mask=input_mask_2)
         out1 = self.avg_vec(encoder_layer_1, input_mask_1)
         out2 = self.avg_vec(encoder_layer_2, input_mask_2)
+        
         out_norm = diff = torch.abs(out1 - out2)
         logit = self.classifier(out_norm)
         softmax = F.softmax(logit, dim=1)
         return logit, softmax
+
+    def freeze_bert_encoder(self):
+        for param in self.bert.parameters():
+            param.requires_grad = False
+    
+    def unfreeze_bert_encoder(self):
+        for param in self.bert.parameters():
+            param.requires_grad = True
 
 class CyclicLR(object):
 
