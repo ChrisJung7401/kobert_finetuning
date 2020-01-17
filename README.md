@@ -46,21 +46,22 @@ fine-tuning pretrained BERT model with Kobert from SKT
 <br>
 
   **How to use**  
-  python -m torch.distributed.launch --nproc_per_node=4 run_classifier_sms.py \
-   --train_file news_tr_no_cls5.txt \
-   --eval_file news_te.txt \
-   --dev_file news_dev_1.txt \
-   --data_dir /home/advice/notebook/jms/우리은행/data/ \
-   --task_name news \
-   --bert_model extract_kobert/kobert_model.bin \
-   --model_config extract_kobert/kobert_config.json \
-   --tokenizer /home/advice/notebook/jms/kobert/kobert_news_wiki_ko_cased-1087f8699e.spiece \
-   --train_batch_size 8 \
-   --eval_batch_size 32 \
-   --num_train_epochs 1 \
-   --local_rank 0 \
-   --fp16 True \
-   --valid_size 3000
+  
+      python -m torch.distributed.launch --nproc_per_node=4 run_classifier_sms.py \
+       --train_file news_tr_no_cls5.txt \
+       --eval_file news_te.txt \
+       --dev_file news_dev_1.txt \
+       --data_dir /home/advice/notebook/jms/우리은행/data/ \
+       --task_name news \
+       --bert_model extract_kobert/kobert_model.bin \
+       --model_config extract_kobert/kobert_config.json \
+       --tokenizer /home/advice/notebook/jms/kobert/kobert_news_wiki_ko_cased-1087f8699e.spiece \
+       --train_batch_size 8 \
+       --eval_batch_size 32 \
+       --num_train_epochs 1 \
+       --local_rank 0 \
+       --fp16 True \
+       --valid_size 3000
    
 <br>
 
