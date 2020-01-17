@@ -51,7 +51,7 @@ fine-tuning pretrained BERT model with Kobert from SKT
        --train_file news_tr_no_cls5.txt \
        --eval_file news_te.txt \
        --dev_file news_dev_1.txt \
-       --data_dir /home/advice/notebook/jms/우리은행/data/ \
+       --data_dir /home/advice/notebook/jms/haha/data/ \
        --task_name news \
        --bert_model extract_kobert/kobert_model.bin \
        --model_config extract_kobert/kobert_config.json \
